@@ -1,6 +1,14 @@
 const fs = require('fs').promises;
 const { nanoid } = require('nanoid');
-const { FileContext, Constants, Tools, SystemRoles } = require('librechat-data-provider');
+const {
+  Tools,
+  Constants,
+  FileContext,
+  FileSources,
+  SystemRoles,
+  EToolResources,
+  actionDelimiter,
+} = require('librechat-data-provider');
 const {
   getAgent,
   createAgent,
@@ -10,8 +18,10 @@ const {
 } = require('~/models/Agent');
 const { uploadImageBuffer, filterFile } = require('~/server/services/Files/process');
 const { getStrategyFunctions } = require('~/server/services/Files/strategies');
-const { getProjectByName } = require('~/models/Project');
+const { refreshS3Url } = require('~/server/services/Files/S3/crud');
+const { updateAction, getActions } = require('~/models/Action');
 const { updateAgentProjects } = require('~/models/Agent');
+const { getProjectByName } = require('~/models/Project');
 const { deleteFileByFilter } = require('~/models/File');
 const { logger } = require('~/config');
 
@@ -94,6 +104,14 @@ const getAgentHandler = async (req, res) => {
       return res.status(404).json({ error: 'Agent not found' });
     }
 
+    if (agent.avatar && agent.avatar?.source === FileSources.s3) {
+      const originalUrl = agent.avatar.filepath;
+      agent.avatar.filepath = await refreshS3Url(agent.avatar);
+      if (originalUrl !== agent.avatar.filepath) {
+        await updateAgent({ id }, { avatar: agent.avatar });
+      }
+    }
+
     agent.author = agent.author.toString();
     agent.isCollaborative = !!agent.isCollaborative;
 
@@ -169,6 +187,111 @@ const updateAgentHandler = async (req, res) => {
     return res.json(updatedAgent);
   } catch (error) {
     logger.error('[/Agents/:id] Error updating Agent', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Duplicates an Agent based on the provided ID.
+ * @route POST /Agents/:id/duplicate
+ * @param {object} req - Express Request
+ * @param {object} req.params - Request params
+ * @param {string} req.params.id - Agent identifier.
+ * @returns {Agent} 201 - success response - application/json
+ */
+const duplicateAgentHandler = async (req, res) => {
+  const { id } = req.params;
+  const { id: userId } = req.user;
+  const sensitiveFields = ['api_key', 'oauth_client_id', 'oauth_client_secret'];
+
+  try {
+    const agent = await getAgent({ id });
+    if (!agent) {
+      return res.status(404).json({
+        error: 'Agent not found',
+        status: 'error',
+      });
+    }
+
+    const {
+      id: _id,
+      _id: __id,
+      author: _author,
+      createdAt: _createdAt,
+      updatedAt: _updatedAt,
+      tool_resources: _tool_resources = {},
+      ...cloneData
+    } = agent;
+    cloneData.name = `${agent.name} (${new Date().toLocaleString('en-US', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+      hour12: false,
+    })})`;
+
+    if (_tool_resources?.[EToolResources.ocr]) {
+      cloneData.tool_resources = {
+        [EToolResources.ocr]: _tool_resources[EToolResources.ocr],
+      };
+    }
+
+    const newAgentId = `agent_${nanoid()}`;
+    const newAgentData = Object.assign(cloneData, {
+      id: newAgentId,
+      author: userId,
+    });
+
+    const newActionsList = [];
+    const originalActions = (await getActions({ agent_id: id }, true)) ?? [];
+    const promises = [];
+
+    /**
+     * Duplicates an action and returns the new action ID.
+     * @param {Action} action
+     * @returns {Promise<string>}
+     */
+    const duplicateAction = async (action) => {
+      const newActionId = nanoid();
+      const [domain] = action.action_id.split(actionDelimiter);
+      const fullActionId = `${domain}${actionDelimiter}${newActionId}`;
+
+      const newAction = await updateAction(
+        { action_id: newActionId },
+        {
+          metadata: action.metadata,
+          agent_id: newAgentId,
+          user: userId,
+        },
+      );
+
+      const filteredMetadata = { ...newAction.metadata };
+      for (const field of sensitiveFields) {
+        delete filteredMetadata[field];
+      }
+
+      newAction.metadata = filteredMetadata;
+      newActionsList.push(newAction);
+      return fullActionId;
+    };
+
+    for (const action of originalActions) {
+      promises.push(
+        duplicateAction(action).catch((error) => {
+          logger.error('[/agents/:id/duplicate] Error duplicating Action:', error);
+        }),
+      );
+    }
+
+    const agentActions = await Promise.all(promises);
+    newAgentData.actions = agentActions;
+    const newAgent = await createAgent(newAgentData);
+
+    return res.status(201).json({
+      agent: newAgent,
+      actions: newActionsList,
+    });
+  } catch (error) {
+    logger.error('[/Agents/:id/duplicate] Error duplicating Agent:', error);
+
     res.status(500).json({ error: error.message });
   }
 };
@@ -292,6 +415,7 @@ module.exports = {
   createAgent: createAgentHandler,
   getAgent: getAgentHandler,
   updateAgent: updateAgentHandler,
+  duplicateAgent: duplicateAgentHandler,
   deleteAgent: deleteAgentHandler,
   getListAgents: getListAgentsHandler,
   uploadAgentAvatar: uploadAgentAvatarHandler,

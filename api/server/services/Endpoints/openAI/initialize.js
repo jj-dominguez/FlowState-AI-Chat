@@ -7,8 +7,14 @@ const {
 const { getUserKeyValues, checkUserKeyExpiry } = require('~/server/services/UserService');
 const { getLLMConfig } = require('~/server/services/Endpoints/openAI/llm');
 const { isEnabled, isUserProvided, sleep } = require('~/server/utils');
+const OpenAIClient = require('~/app/clients/OpenAIClient');
 const { getAzureCredentials } = require('~/utils');
-const { OpenAIClient } = require('~/app');
+
+function createHandleNewToken(streamRate) {
+  async () => {
+    await sleep(streamRate);
+  };
+}
 
 const initializeClient = async ({
   req,
@@ -54,7 +60,7 @@ const initializeClient = async ({
   let apiKey = userProvidesKey ? userValues?.apiKey : credentials[endpoint];
   let baseURL = userProvidesURL ? userValues?.baseURL : baseURLOptions[endpoint];
 
-  const clientOptions = {
+  let clientOptions = {
     contextStrategy,
     proxy: PROXY ?? null,
     debug: isEnabled(DEBUG_OPENAI),
@@ -113,6 +119,7 @@ const initializeClient = async ({
 
   if (!isAzureOpenAI && openAIConfig) {
     clientOptions.streamRate = openAIConfig.streamRate;
+    clientOptions.titleModel = openAIConfig.titleModel;
   }
 
   /** @type {undefined | TBaseEndpoint} */
@@ -134,21 +141,18 @@ const initializeClient = async ({
   }
 
   if (optionsOnly) {
-    const requestOptions = Object.assign(
-      {
-        modelOptions: endpointOption.model_parameters,
-      },
-      clientOptions,
-    );
-    const options = getLLMConfig(apiKey, requestOptions);
-    if (!clientOptions.streamRate) {
+    const modelOptions = endpointOption.model_parameters;
+    modelOptions.model = modelName;
+    clientOptions = Object.assign({ modelOptions }, clientOptions);
+    clientOptions.modelOptions.user = req.user.id;
+    const options = getLLMConfig(apiKey, clientOptions);
+    const streamRate = clientOptions.streamRate;
+    if (!streamRate) {
       return options;
     }
     options.llmConfig.callbacks = [
       {
-        handleLLMNewToken: async () => {
-          await sleep(clientOptions.streamRate);
-        },
+        handleLLMNewToken: createHandleNewToken(streamRate),
       },
     ];
     return options;

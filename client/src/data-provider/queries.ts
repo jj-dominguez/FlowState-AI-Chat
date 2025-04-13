@@ -5,6 +5,7 @@ import {
   defaultOrderQuery,
   defaultAssistantsVersion,
 } from 'librechat-data-provider';
+import { useRecoilValue } from 'recoil';
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   UseInfiniteQueryOptions,
@@ -24,15 +25,17 @@ import type {
   AssistantDocument,
   TEndpointsConfig,
   TCheckUserKeyResponse,
-  SharedLinkListParams,
+  SharedLinksListParams,
   SharedLinksResponse,
 } from 'librechat-data-provider';
 import { findPageForConversation } from '~/utils';
+import store from '~/store';
 
 export const useGetPresetsQuery = (
   config?: UseQueryOptions<TPreset[]>,
 ): QueryObserverResult<TPreset[], unknown> => {
   return useQuery<TPreset[]>([QueryKeys.presets], () => dataService.getPresets(), {
+    staleTime: 1000 * 10,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     refetchOnMount: false,
@@ -115,6 +118,7 @@ export const useConversationsInfiniteQuery = (
   params?: ConversationListParams,
   config?: UseInfiniteQueryOptions<ConversationListResponse, unknown>,
 ) => {
+  const queriesEnabled = useRecoilValue<boolean>(store.queriesEnabled);
   return useInfiniteQuery<ConversationListResponse, unknown>(
     params?.isArchived === true ? [QueryKeys.archivedConversations] : [QueryKeys.allConversations],
     ({ pageParam = '' }) =>
@@ -135,35 +139,34 @@ export const useConversationsInfiniteQuery = (
       refetchOnReconnect: false,
       refetchOnMount: false,
       ...config,
+      enabled: (config?.enabled ?? true) === true && queriesEnabled,
     },
   );
 };
 
-export const useSharedLinksInfiniteQuery = (
-  params?: SharedLinkListParams,
+export const useSharedLinksQuery = (
+  params: SharedLinksListParams,
   config?: UseInfiniteQueryOptions<SharedLinksResponse, unknown>,
 ) => {
-  return useInfiniteQuery<SharedLinksResponse, unknown>(
-    [QueryKeys.sharedLinks],
-    ({ pageParam = '' }) =>
+  const { pageSize, isPublic, search, sortBy, sortDirection } = params;
+
+  return useInfiniteQuery<SharedLinksResponse>({
+    queryKey: [QueryKeys.sharedLinks, { pageSize, isPublic, search, sortBy, sortDirection }],
+    queryFn: ({ pageParam }) =>
       dataService.listSharedLinks({
-        ...params,
-        pageNumber: pageParam?.toString(),
-        isPublic: params?.isPublic || true,
+        cursor: pageParam?.toString(),
+        pageSize,
+        isPublic,
+        search,
+        sortBy,
+        sortDirection,
       }),
-    {
-      getNextPageParam: (lastPage) => {
-        const currentPageNumber = Number(lastPage.pageNumber);
-        const totalPages = Number(lastPage.pages); // Convert totalPages to a number
-        // If the current page number is less than total pages, return the next page number
-        return currentPageNumber < totalPages ? currentPageNumber + 1 : undefined;
-      },
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: false,
-      refetchOnMount: false,
-      ...config,
-    },
-  );
+    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    keepPreviousData: true,
+    staleTime: 5 * 60 * 1000, // 5 minutes
+    cacheTime: 30 * 60 * 1000, // 30 minutes
+    ...config,
+  });
 };
 
 export const useConversationTagsQuery = (
@@ -188,9 +191,10 @@ export const useConversationTagsQuery = (
 /**
  * Hook for getting all available tools for Assistants
  */
-export const useAvailableToolsQuery = (
+export const useAvailableToolsQuery = <TData = t.TPlugin[]>(
   endpoint: t.AssistantsEndpoint | EModelEndpoint.agents,
-): QueryObserverResult<TPlugin[]> => {
+  config?: UseQueryOptions<t.TPlugin[], unknown, TData>,
+): QueryObserverResult<TData> => {
   const queryClient = useQueryClient();
   const endpointsConfig = queryClient.getQueryData<TEndpointsConfig>([QueryKeys.endpoints]);
   const keyExpiry = queryClient.getQueryData<TCheckUserKeyResponse>([QueryKeys.name, endpoint]);
@@ -199,7 +203,7 @@ export const useAvailableToolsQuery = (
   const enabled = !!endpointsConfig?.[endpoint] && keyProvided;
   const version: string | number | undefined =
     endpointsConfig?.[endpoint]?.version ?? defaultAssistantsVersion[endpoint];
-  return useQuery<TPlugin[]>(
+  return useQuery<t.TPlugin[], unknown, TData>(
     [QueryKeys.tools],
     () => dataService.getAvailableTools(endpoint, version),
     {
@@ -207,6 +211,7 @@ export const useAvailableToolsQuery = (
       refetchOnReconnect: false,
       refetchOnMount: false,
       enabled,
+      ...config,
     },
   );
 };
@@ -234,6 +239,7 @@ export const useListAssistantsQuery = <TData = AssistantListResponse>(
       // select: (res) => {
       //   return res.data.sort((a, b) => a.created_at - b.created_at);
       // },
+      staleTime: 1000 * 5,
       refetchOnWindowFocus: false,
       refetchOnReconnect: false,
       refetchOnMount: false,

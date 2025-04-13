@@ -1,13 +1,18 @@
-const { Tools, StepTypes, imageGenTools } = require('librechat-data-provider');
+const { nanoid } = require('nanoid');
+const { Tools, StepTypes, FileContext } = require('librechat-data-provider');
 const {
   EnvVar,
+  Providers,
   GraphEvents,
+  getMessageId,
   ToolEndHandler,
+  handleToolCalls,
   ChatModelStreamHandler,
 } = require('@librechat/agents');
 const { processCodeOutput } = require('~/server/services/Files/Code/process');
-const { loadAuthValues } = require('~/app/clients/tools/util');
-const { logger } = require('~/config');
+const { loadAuthValues } = require('~/server/services/Tools/credentials');
+const { saveBase64Image } = require('~/server/services/Files/process');
+const { logger, sendEvent } = require('~/config');
 
 /** @typedef {import('@librechat/agents').Graph} Graph */
 /** @typedef {import('@librechat/agents').EventHandler} EventHandler */
@@ -17,20 +22,6 @@ const { logger } = require('~/config');
 /** @typedef {import('@librechat/agents').ChatModelStreamHandler} ChatModelStreamHandler */
 /** @typedef {import('@librechat/agents').ContentAggregatorResult['aggregateContent']} ContentAggregator */
 /** @typedef {import('@librechat/agents').GraphEvents} GraphEvents */
-
-/**
- * Sends message data in Server Sent Events format.
- * @param {ServerResponse} res - The server response.
- * @param {{ data: string | Record<string, unknown>, event?: string }} event - The message event.
- * @param {string} event.event - The type of event.
- * @param {string} event.data - The message to be sent.
- */
-const sendEvent = (res, event) => {
-  if (typeof event.data === 'string' && event.data.length === 0) {
-    return;
-  }
-  res.write(`event: message\ndata: ${JSON.stringify(event)}\n\n`);
-};
 
 class ModelEndHandler {
   /**
@@ -56,13 +47,54 @@ class ModelEndHandler {
       return;
     }
 
-    const usage = data?.output?.usage_metadata;
-    if (metadata?.model) {
-      usage.model = metadata.model;
-    }
+    try {
+      if (metadata.provider === Providers.GOOGLE || graph.clientOptions?.disableStreaming) {
+        handleToolCalls(data?.output?.tool_calls, metadata, graph);
+      }
 
-    if (usage) {
+      const usage = data?.output?.usage_metadata;
+      if (!usage) {
+        return;
+      }
+      if (metadata?.model) {
+        usage.model = metadata.model;
+      }
+
       this.collectedUsage.push(usage);
+      if (!graph.clientOptions?.disableStreaming) {
+        return;
+      }
+      if (!data.output.content) {
+        return;
+      }
+      const stepKey = graph.getStepKey(metadata);
+      const message_id = getMessageId(stepKey, graph) ?? '';
+      if (message_id) {
+        graph.dispatchRunStep(stepKey, {
+          type: StepTypes.MESSAGE_CREATION,
+          message_creation: {
+            message_id,
+          },
+        });
+      }
+      const stepId = graph.getStepIdByKey(stepKey);
+      const content = data.output.content;
+      if (typeof content === 'string') {
+        graph.dispatchMessageDelta(stepId, {
+          content: [
+            {
+              type: 'text',
+              text: content,
+            },
+          ],
+        });
+      } else if (content.every((c) => c.type?.startsWith('text'))) {
+        graph.dispatchMessageDelta(stepId, {
+          content,
+        });
+      }
+    } catch (error) {
+      logger.error('Error handling model end event:', error);
     }
   }
 }
@@ -168,6 +200,22 @@ function getDefaultHandlers({ res, aggregateContent, toolEndCallback, collectedU
         aggregateContent({ event, data });
       },
     },
+    [GraphEvents.ON_REASONING_DELTA]: {
+      /**
+       * Handle ON_REASONING_DELTA event.
+       * @param {string} event - The event name.
+       * @param {StreamEventData} data - The event data.
+       * @param {GraphRunnableConfig['configurable']} [metadata] The runnable metadata.
+       */
+      handle: (event, data, metadata) => {
+        if (metadata?.last_agent_index === metadata?.agent_index) {
+          sendEvent(res, { event, data });
+        } else if (!metadata?.hide_sequential_outputs) {
+          sendEvent(res, { event, data });
+        }
+        aggregateContent({ event, data });
+      },
+    },
   };
 
   return handlers;
@@ -191,34 +239,55 @@ function createToolEndCallback({ req, res, artifactPromises }) {
       return;
     }
 
-    if (imageGenTools.has(output.name) && output.artifact) {
-      artifactPromises.push(
-        (async () => {
-          const fileMetadata = Object.assign(output.artifact, {
-            messageId: metadata.run_id,
-            toolCallId: output.tool_call_id,
-            conversationId: metadata.thread_id,
-          });
-          if (!res.headersSent) {
-            return fileMetadata;
-          }
-
-          if (!fileMetadata) {
-            return null;
-          }
-
-          res.write(`event: attachment\ndata: ${JSON.stringify(fileMetadata)}\n\n`);
-          return fileMetadata;
-        })().catch((error) => {
-          logger.error('Error processing code output:', error);
-          return null;
-        }),
-      );
+    if (!output.artifact) {
       return;
     }
 
-    if (output.name !== Tools.execute_code) {
+    if (output.artifact.content) {
+      /** @type {FormattedContent[]} */
+      const content = output.artifact.content;
+      for (const part of content) {
+        if (part.type !== 'image_url') {
+          continue;
+        }
+        const { url } = part.image_url;
+        artifactPromises.push(
+          (async () => {
+            const filename = `${output.name}_${output.tool_call_id}_img_${nanoid()}`;
+            const file = await saveBase64Image(url, {
+              req,
+              filename,
+              endpoint: metadata.provider,
+              context: FileContext.image_generation,
+            });
+            const fileMetadata = Object.assign(file, {
+              messageId: metadata.run_id,
+              toolCallId: output.tool_call_id,
+              conversationId: metadata.thread_id,
+            });
+            if (!res.headersSent) {
+              return fileMetadata;
+            }
+
+            if (!fileMetadata) {
+              return null;
+            }
+
+            res.write(`event: attachment\ndata: ${JSON.stringify(fileMetadata)}\n\n`);
+            return fileMetadata;
+          })().catch((error) => {
+            logger.error('Error processing artifact content:', error);
+            return null;
+          }),
+        );
+      }
       return;
+    }
+
+    {
+      if (output.name !== Tools.execute_code) {
+        return;
+      }
     }
 
     if (!output.artifact.files) {
@@ -263,7 +332,6 @@ function createToolEndCallback({ req, res, artifactPromises }) {
 }
 
 module.exports = {
-  sendEvent,
   getDefaultHandlers,
   createToolEndCallback,
 };
