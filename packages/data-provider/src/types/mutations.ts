@@ -6,14 +6,13 @@ import {
   Assistant,
   AssistantCreateParams,
   AssistantUpdateParams,
-  ActionMetadata,
   FunctionTool,
   AssistantDocument,
-  Action,
   Agent,
   AgentCreateParams,
   AgentUpdateParams,
 } from './assistants';
+import { Action, ActionMetadata } from './agents';
 
 export type MutationOptions<
   Response,
@@ -129,7 +128,20 @@ export type UpdateAgentVariables = {
   data: AgentUpdateParams;
 };
 
-export type UpdateAgentMutationOptions = MutationOptions<Agent, UpdateAgentVariables>;
+export type DuplicateVersionError = Error & {
+  statusCode?: number;
+  details?: {
+    duplicateVersion?: unknown;
+    versionIndex?: number;
+  };
+};
+
+export type UpdateAgentMutationOptions = MutationOptions<
+  Agent,
+  UpdateAgentVariables,
+  unknown,
+  DuplicateVersionError
+>;
 
 export type DuplicateAgentBody = {
   agent_id: string;
@@ -159,9 +171,21 @@ export type DeleteAgentActionVariables = {
 
 export type DeleteAgentActionOptions = MutationOptions<void, DeleteAgentActionVariables>;
 
+export type RevertAgentVersionVariables = {
+  agent_id: string;
+  version_index: number;
+};
+
+export type RevertAgentVersionOptions = MutationOptions<Agent, RevertAgentVersionVariables>;
+
 export type DeleteConversationOptions = MutationOptions<
   types.TDeleteConversationResponse,
   types.TDeleteConversationRequest
+>;
+
+export type ArchiveConversationOptions = MutationOptions<
+  types.TArchiveConversationResponse,
+  types.TArchiveConversationRequest
 >;
 
 export type DuplicateConvoOptions = MutationOptions<
@@ -253,7 +277,7 @@ export type UpdatePermVars<T> = {
 };
 
 export type UpdatePromptPermVars = UpdatePermVars<p.TPromptPermissions>;
-
+export type UpdateMemoryPermVars = UpdatePermVars<p.TMemoryPermissions>;
 export type UpdateAgentPermVars = UpdatePermVars<p.TAgentPermissions>;
 
 export type UpdatePermResponse = r.TRole;
@@ -261,6 +285,13 @@ export type UpdatePermResponse = r.TRole;
 export type UpdatePromptPermOptions = MutationOptions<
   UpdatePermResponse,
   UpdatePromptPermVars,
+  unknown,
+  types.TError | null | undefined
+>;
+
+export type UpdateMemoryPermOptions = MutationOptions<
+  UpdatePermResponse,
+  UpdateMemoryPermVars,
   unknown,
   types.TError | null | undefined
 >;

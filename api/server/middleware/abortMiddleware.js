@@ -108,8 +108,8 @@ async function abortMessage(req, res) {
   res.send(JSON.stringify(finalEvent));
 }
 
-const handleAbort = () => {
-  return async (req, res) => {
+const handleAbort = function () {
+  return async function (req, res) {
     try {
       if (isEnabled(process.env.LIMIT_CONCURRENT_MESSAGES)) {
         await clearPendingReq({ userId: req.user.id });
@@ -311,7 +311,7 @@ const handleAbortError = async (res, req, error, data) => {
   } else {
     logger.error('[handleAbortError] AI response error; aborting request:', error);
   }
-  const { sender, conversationId, messageId, parentMessageId, partialText } = data;
+  const { sender, conversationId, messageId, parentMessageId, userMessageId, partialText } = data;
 
   if (error.stack && error.stack.includes('google')) {
     logger.warn(
@@ -327,7 +327,7 @@ const handleAbortError = async (res, req, error, data) => {
     errorText = `{"type":"${ErrorTypes.INVALID_REQUEST}"}`;
   }
 
-  if (error?.message?.includes('does not support \'system\'')) {
+  if (error?.message?.includes("does not support 'system'")) {
     errorText = `{"type":"${ErrorTypes.NO_SYSTEM_MESSAGES}"}`;
   }
 
@@ -344,10 +344,10 @@ const handleAbortError = async (res, req, error, data) => {
       parentMessageId,
       text: errorText,
       user: req.user.id,
-      shouldSaveMessage: true,
       spec: endpointOption?.spec,
       iconURL: endpointOption?.iconURL,
       modelLabel: endpointOption?.modelLabel,
+      shouldSaveMessage: userMessageId != null,
       model: endpointOption?.modelOptions?.model || req.body?.model,
     };
 

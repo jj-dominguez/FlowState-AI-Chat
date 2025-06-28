@@ -52,6 +52,11 @@ bower_components/
 *.d.ts
 !vite-env.d.ts
 
+# AI
+.clineignore
+.cursor
+.aider*
+
 # Floobits
 .floo
 .floobit
@@ -111,4 +116,13 @@ uploads/
 # owner
 release/
 .qodo
+
+# Helm
+helm/librechat/Chart.lock
+helm/**/charts/
+helm/**/.values.yaml
+
 !/client/src/@types/i18next.d.ts
+
+# SAML Idp cert
+*.cert
